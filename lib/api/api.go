@@ -2489,6 +2489,9 @@ func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
 // cleanDevice removes a device ID from all folders in the default folder structure
 // and removes empty subfolders if they contain no other device IDs
 // This is an unauthenticated endpoint that only accepts requests from localhost
+// cleanDevice removes a device ID from all folders in the default folder structure
+// and removes empty subfolders if they contain no other device IDs
+// This is an unauthenticated endpoint that only accepts requests from localhost
 func (s *service) cleanDevice(w http.ResponseWriter, r *http.Request) {
 	l.Infoln("cleanDevice: Received request to clean up a device ID")
 	
@@ -2507,15 +2510,7 @@ func (s *service) cleanDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	// Parse the device ID
-	deviceID, err := protocol.DeviceIDFromString(deviceIDStr)
-	if err != nil {
-		l.Warnln("cleanDevice: Invalid device ID format:", err)
-		http.Error(w, fmt.Sprintf("Invalid device ID format: %v", err), http.StatusBadRequest)
-		return
-	}
-	
-	l.Infoln("cleanDevice: Processing device ID:", deviceID)
+	l.Infoln("cleanDevice: Processing device ID:", deviceIDStr)
 
 	// Get the path of the Default folder
 	defaultFolder, ok := s.cfg.Folder("default")
@@ -2528,8 +2523,8 @@ func (s *service) cleanDevice(w http.ResponseWriter, r *http.Request) {
 	l.Infoln("cleanDevice: Default folder path:", defaultFolderPath)
 
 	// Track results
-	foldersModified := 0
-	foldersRemoved := 0
+	deviceDirsRemoved := 0
+	emptyFoldersRemoved := 0
 	errors := []string{}
 
 	// Get all subfolders in the default folder
@@ -2555,42 +2550,7 @@ func (s *service) cleanDevice(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		
-		// 1. First, remove the device ID from this folder in the configuration
-		waiter, err := s.cfg.Modify(func(cfg *config.Configuration) {
-			folder, _, ok := cfg.Folder(folderName)
-			if !ok {
-				l.Debugln("cleanDevice: Folder not found in configuration:", folderName)
-				return
-			}
-			
-			// Check if the device is in the folder
-			deviceFound := false
-			for i, device := range folder.Devices {
-				if device.DeviceID == deviceID {
-					// Remove this device from the folder's configuration
-					folder.Devices = append(folder.Devices[:i], folder.Devices[i+1:]...)
-					deviceFound = true
-					break
-				}
-			}
-			
-			if deviceFound {
-				l.Infoln("cleanDevice: Removed device from folder configuration:", folderName)
-				cfg.SetFolder(folder)
-				foldersModified++
-			}
-		})
-		
-		if err != nil {
-			l.Warnln("cleanDevice: Error modifying configuration for folder", folderName, ":", err)
-			errors = append(errors, fmt.Sprintf("Error modifying %s: %v", folderName, err))
-			continue
-		}
-		
-		// Wait for configuration change to complete
-		waiter.Wait()
-		
-		// 2. Next, check if the device ID directory exists in this folder
+		// Check if the device ID directory exists in this folder
 		devicePath := filepath.Join(subpath, deviceIDStr)
 		deviceExists, err := exists(devicePath)
 		if err != nil {
@@ -2608,7 +2568,9 @@ func (s *service) cleanDevice(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			
-			// 3. Check if this was the last device ID in the folder
+			deviceDirsRemoved++
+			
+			// Check if this was the last device ID in the folder
 			remainingEntries, err := os.ReadDir(subpath)
 			if err != nil {
 				l.Warnln("cleanDevice: Error reading subfolder:", err)
@@ -2625,45 +2587,26 @@ func (s *service) cleanDevice(w http.ResponseWriter, r *http.Request) {
 			}
 			
 			if deviceCount == 0 {
-				// This was the last device ID, remove the folder from configuration
-				l.Infoln("cleanDevice: No devices left in folder, removing folder:", folderName)
+				// This was the last device ID, remove the folder
+				l.Infoln("cleanDevice: No devices left in folder, removing folder:", subpath)
 				
-				// Remove the folder from configuration
-				waiter, err := s.cfg.Modify(func(cfg *config.Configuration) {
-					cfg.RemoveFolder(folderName)
-				})
-				
-				if err != nil {
-					l.Warnln("cleanDevice: Error removing folder from configuration:", err)
-					errors = append(errors, fmt.Sprintf("Error removing folder %s from config: %v", folderName, err))
+				if err := os.RemoveAll(subpath); err != nil {
+					l.Warnln("cleanDevice: Error removing empty folder:", err)
+					errors = append(errors, fmt.Sprintf("Error removing empty folder %s: %v", folderName, err))
 					continue
 				}
 				
-				waiter.Wait()
-				foldersRemoved++
-				
-				// Note: We don't actually delete the folder to avoid data loss,
-				// but we could optionally do so if that's the desired behavior
+				emptyFoldersRemoved++
 			}
 		}
 	}
 	
-	// Save the configuration after all modifications
-	if foldersModified > 0 || foldersRemoved > 0 {
-		l.Infoln("cleanDevice: Saving configuration after modifications")
-		if err := s.cfg.Save(); err != nil {
-			l.Warnln("cleanDevice: Error saving configuration:", err)
-			http.Error(w, fmt.Sprintf("Error saving configuration: %v", err), http.StatusInternalServerError)
-			return
-		}
-	}
-	
 	// Return results
-	l.Infoln("cleanDevice: Completed with", foldersModified, "folders modified,", foldersRemoved, "folders removed,", len(errors), "errors")
+	l.Infoln("cleanDevice: Completed with", deviceDirsRemoved, "device directories removed,", emptyFoldersRemoved, "empty folders removed,", len(errors), "errors")
 	response := map[string]interface{}{
 		"deviceID": deviceIDStr,
-		"foldersModified": foldersModified,
-		"foldersRemoved": foldersRemoved,
+		"deviceDirsRemoved": deviceDirsRemoved,
+		"emptyFoldersRemoved": emptyFoldersRemoved,
 	}
 	
 	if len(errors) > 0 {
