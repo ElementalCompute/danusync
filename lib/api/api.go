@@ -475,6 +475,7 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/debug", s.getSystemDebug)               // -
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/log", s.getSystemLog)                   // [since]
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/log.txt", s.getSystemLogTxt)            // [since]
+	restMux.HandlerFunc(http.MethodGet, "/rest/noauth/sync", s.getAvailable)                  // does a folder exist on the network?
 
 	// The POST handlers
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/prio", s.postDBPrio)                          // folder file
@@ -2480,6 +2481,97 @@ func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, map[string]string{
 		"id":   folder.ID,
 		"path": folder.Path,
+	})
+}
+// getAvailable checks if a folder exists in the default folder structure
+// and counts the number of peer device IDs present in it
+// This is an unauthenticated endpoint that only accepts requests from localhost
+func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
+	l.Infoln("getAvailable: Received request to check folder availability")
+	
+	// Check if request is from localhost - security measure
+	if !addressIsLocalhost(r.RemoteAddr) {
+		l.Warnln("getAvailable: Access denied - request not from localhost:", r.RemoteAddr)
+		http.Error(w, "Access denied: This endpoint is only available from localhost", http.StatusForbidden)
+		return
+	}
+
+	// Get path from query parameter
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		l.Warnln("getAvailable: Missing path parameter")
+		http.Error(w, "path parameter is required", http.StatusBadRequest)
+		return
+	}
+	l.Infoln("getAvailable: Processing path:", path)
+
+	// Extract the innermost folder name to use as ID
+	folderName := filepath.Base(path)
+	if folderName == "" || folderName == "." || folderName == "/" {
+		l.Warnln("getAvailable: Invalid path, cannot extract folder name:", path)
+		http.Error(w, "invalid path: cannot extract folder name", http.StatusBadRequest)
+		return
+	}
+	l.Infoln("getAvailable: Using folder name:", folderName)
+
+	// Get the path of the Default folder
+	defaultFolder, ok := s.cfg.Folder("default")
+	if !ok {
+		l.Warnln("getAvailable: Default folder not found")
+		http.Error(w, "Default folder not found in configuration", http.StatusInternalServerError)
+		return
+	}
+	defaultFolderPath := defaultFolder.Path
+	l.Infoln("getAvailable: Default folder path:", defaultFolderPath)
+
+	// Check if the subdir for the id exists in the default folder
+	subpath := filepath.Join(defaultFolderPath, folderName)
+	l.Debugln("getAvailable: Checking if subdirectory exists:", subpath)
+	exist, err := exists(subpath)
+	if err != nil {
+		// Handle error from checking if path exists
+		l.Warnln("getAvailable: Error checking subdirectory:", err)
+		http.Error(w, fmt.Sprintf("Error checking subdirectory: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	peerCount := 0
+	if exist {
+		// Directory exists, count the number of device IDs in it
+		l.Infoln("getAvailable: Subdirectory exists, counting peer device IDs")
+		
+		// Read the directory entries
+		entries, err := os.ReadDir(subpath)
+		if err != nil {
+			l.Warnln("getAvailable: Error reading subdirectory:", err)
+			http.Error(w, fmt.Sprintf("Error reading subdirectory: %v", err), http.StatusInternalServerError)
+			return
+		}
+		
+		// Count valid device IDs
+		for _, entry := range entries {
+			if entry.IsDir() {
+				// Check if the directory name is a valid device ID
+				if deviceID, err := protocol.DeviceIDFromString(entry.Name()); err == nil {
+					// Skip our own device ID
+					if deviceID != s.id {
+						peerCount++
+						l.Debugln("getAvailable: Found peer device ID:", deviceID)
+					} else {
+						l.Debugln("getAvailable: Skipping our own device ID:", deviceID)
+					}
+				}
+			}
+		}
+		l.Infoln("getAvailable: Found", peerCount, "peer device IDs in folder", folderName)
+	} else {
+		l.Infoln("getAvailable: Subdirectory doesn't exist, no peers available")
+	}
+
+	// Return the number of peers
+	l.Infoln("getAvailable: Returning peer count:", peerCount)
+	sendJSON(w, map[string]int{
+		"peers": peerCount,
 	})
 }
 
