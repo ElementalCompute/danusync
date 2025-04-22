@@ -477,6 +477,7 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/log.txt", s.getSystemLogTxt)            // [since]
 	restMux.HandlerFunc(http.MethodGet, "/rest/noauth/available", s.getAvailable)             // does a folder exist on the network?
 	restMux.HandlerFunc(http.MethodGet, "/rest/noauth/device", s.cleanDevice)                 // Remove a device from the network as a peer
+	restMux.HandlerFunc(http.MethodGet, "/rest/noauth/folders", s.getFolderList)			  // Get a list of available folders
 
 	// The POST handlers
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/prio", s.postDBPrio)                          // folder file
@@ -2320,7 +2321,111 @@ func exists(path string) (bool, error) {
 	}
 	return false, err
 }
+// getFolderList returns a list of folder IDs for which getAvailable would return > 0
+// This is an unauthenticated endpoint that only accepts requests from localhost
+func (s *service) getFolderList(w http.ResponseWriter, r *http.Request) {
+	l.Infoln("getFolderList: Received request for folders with available resources")
 
+	// Check if request is from localhost - security measure
+	if !addressIsLocalhost(r.RemoteAddr) {
+		l.Warnln("getFolderList: Access denied - request not from localhost:", r.RemoteAddr)
+		http.Error(w, "Access denied: This endpoint is only available from localhost", http.StatusForbidden)
+		return
+	}
+
+	// Get the default folder to access its path
+	defaultFolder, ok := s.cfg.Folder("default")
+	if !ok {
+		l.Warnln("getFolderList: Default folder not found")
+		http.Error(w, "Default folder not found", http.StatusInternalServerError)
+		return
+	}
+	defaultFolderPath := defaultFolder.Path
+	l.Infoln("getFolderList: Default folder path:", defaultFolderPath)
+
+	var availableFolders []string
+	
+	// Iterate through all folders in configuration
+	l.Debugln("getFolderList: Checking all folders for availability")
+	for _, folder := range s.cfg.FolderList() {
+		folderID := folder.ID
+		
+		// Skip the default folder itself
+		if folderID == "default" {
+			l.Debugln("getFolderList: Skipping default folder")
+			continue
+		}
+		
+		l.Debugln("getFolderList: Checking folder:", folderID)
+		
+		// Check each device's subdirectory in default folder structure
+		deviceSubdir := filepath.Join(defaultFolderPath, folderID)
+		
+		// Skip if the folder's subdirectory doesn't exist in default folder
+		exists, err := exists(deviceSubdir)
+		if err != nil {
+			l.Warnln("getFolderList: Error checking folder subdirectory:", err)
+			continue
+		}
+		if !exists {
+			l.Debugln("getFolderList: Folder subdirectory doesn't exist:", deviceSubdir)
+			continue
+		}
+		
+		// Read all items in the folder's subdirectory
+		items, err := os.ReadDir(deviceSubdir)
+		if err != nil {
+			l.Warnln("getFolderList: Error reading directory:", err)
+			continue
+		}
+		
+		// Exit early as soon as we find one valid device ID
+		hasAvailableDevice := false
+		for _, item := range items {
+			if item.IsDir() {
+				// Check if directory name is a valid device ID
+				if _, err := protocol.DeviceIDFromString(item.Name()); err == nil {
+					l.Debugln("getFolderList: Found device:", item.Name())
+					hasAvailableDevice = true
+					break  // Exit as soon as we find one device
+				}
+			}
+		}
+		
+		// If we have at least one available device, add this folder to our list
+		if hasAvailableDevice {
+			l.Infoln("getFolderList: Folder has available resources:", folderID)
+			availableFolders = append(availableFolders, folderID)
+		}
+	}
+	
+	l.Infoln("getFolderList: Found", len(availableFolders), "folders with available resources")
+	
+	// Prepare response data structure
+	type folderInfo struct {
+		ID   string `json:"id"`
+		Path string `json:"path"`
+	}
+	
+	// Build response with folder ID and path information
+	response := make([]folderInfo, 0, len(availableFolders))
+	for _, id := range availableFolders {
+		folder, ok := s.cfg.Folder(id)
+		if !ok {
+			l.Warnln("getFolderList: Folder configuration not found for ID:", id)
+			continue
+		}
+		
+		response = append(response, folderInfo{
+			ID:   folder.ID,
+			Path: folder.Path,
+		})
+	}
+	
+	// Send JSON response
+	l.Debugln("getFolderList: Sending response with", len(response), "folders")
+	sendJSON(w, response)
+}
 // postSync adds a folder at the specified path
 // This is an unauthenticated endpoint that only accepts requests from localhost
 func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
