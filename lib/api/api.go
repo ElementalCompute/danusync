@@ -2488,9 +2488,12 @@ func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
 // getAvailable checks if a folder exists in the default folder structure
 // and counts the number of peer device IDs present in it
 // This is an unauthenticated endpoint that only accepts requests from localhost
+// getAvailable checks if a folder exists in the default folder structure
+// and counts the number of peer device IDs present in it
+// This is an unauthenticated endpoint that only accepts requests from localhost
 func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
 	l.Infoln("getAvailable: Received request to check folder availability")
-
+	
 	// Check if request is from localhost - security measure
 	if !addressIsLocalhost(r.RemoteAddr) {
 		l.Warnln("getAvailable: Access denied - request not from localhost:", r.RemoteAddr)
@@ -2516,7 +2519,15 @@ func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
 	}
 	l.Infoln("getAvailable: Using folder name:", folderName)
 
-	// Get the path of the Default folder
+	// Check if the folder exists directly
+	folderExists, err := exists(path)
+	if err != nil {
+		l.Warnln("getAvailable: Error checking folder path:", err)
+		http.Error(w, fmt.Sprintf("Error checking folder path: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Get the path of the Default folder (usually named "Sync" in the configuration)
 	defaultFolder, ok := s.cfg.Folder("default")
 	if !ok {
 		l.Warnln("getAvailable: Default folder not found")
@@ -2529,19 +2540,18 @@ func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
 	// Check if the subdir for the id exists in the default folder
 	subpath := filepath.Join(defaultFolderPath, folderName)
 	l.Debugln("getAvailable: Checking if subdirectory exists:", subpath)
-	exist, err := exists(subpath)
+	subpathExists, err := exists(subpath)
 	if err != nil {
-		// Handle error from checking if path exists
 		l.Warnln("getAvailable: Error checking subdirectory:", err)
 		http.Error(w, fmt.Sprintf("Error checking subdirectory: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	peerCount := 0
-	if exist {
-		// Directory exists, count the number of device IDs in it
+	if subpathExists {
+		// Directory exists in the default folder structure, count the directories inside it
 		l.Infoln("getAvailable: Subdirectory exists, counting peer device IDs")
-
+		
 		// Read the directory entries
 		entries, err := os.ReadDir(subpath)
 		if err != nil {
@@ -2549,25 +2559,28 @@ func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Error reading subdirectory: %v", err), http.StatusInternalServerError)
 			return
 		}
-
-		// Count valid device IDs
+		
+		// Count all directories as potential device IDs
+		// This approach is more robust as it doesn't rely on strict device ID validation
+		myIDStr := s.id.String()
 		for _, entry := range entries {
 			if entry.IsDir() {
-				// Check if the directory name is a valid device ID
-				if deviceID, err := protocol.DeviceIDFromString(entry.Name()); err == nil {
-					// Skip our own device ID
-					if deviceID != s.id {
-						peerCount++
-						l.Debugln("getAvailable: Found peer device ID:", deviceID)
-					} else {
-						l.Debugln("getAvailable: Skipping our own device ID:", deviceID)
-					}
+				// Skip our own device ID folder if it exists
+				if entry.Name() != myIDStr {
+					peerCount++
+					l.Debugln("getAvailable: Found peer device folder:", entry.Name())
+				} else {
+					l.Debugln("getAvailable: Skipping our own device folder:", entry.Name())
 				}
 			}
 		}
-		l.Infoln("getAvailable: Found", peerCount, "peer device IDs in folder", folderName)
+		l.Infoln("getAvailable: Found", peerCount, "peer device folders in", folderName)
+	} else if folderExists {
+		// The target folder exists but not in the default structure
+		l.Infoln("getAvailable: Target folder exists but not in Sync structure, no peers")
 	} else {
-		l.Infoln("getAvailable: Subdirectory doesn't exist, no peers available")
+		// Neither the target folder nor the subpath exists
+		l.Infoln("getAvailable: Neither target folder nor subdirectory exists, no peers")
 	}
 
 	// Return the number of peers
