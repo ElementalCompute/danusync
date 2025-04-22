@@ -27,8 +27,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 	builtinsync "sync"
+	"time"
 	"unicode"
 
 	"github.com/calmh/incontainer"
@@ -55,10 +55,10 @@ import (
 	"github.com/syncthing/syncthing/lib/rand"
 	"github.com/syncthing/syncthing/lib/svcutil"
 	"github.com/syncthing/syncthing/lib/sync"
+	"github.com/syncthing/syncthing/lib/tailnet"
 	"github.com/syncthing/syncthing/lib/tlsutil"
 	"github.com/syncthing/syncthing/lib/upgrade"
 	"github.com/syncthing/syncthing/lib/ur"
-	"github.com/syncthing/syncthing/lib/tailnet"
 	//"github.com/syncthing/syncthing/lib/config"
 )
 
@@ -146,7 +146,7 @@ func waitForCompletion(ctx context.Context, completed func() bool) bool {
 	// Check every 100ms
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -184,12 +184,12 @@ func NewMultiListener(listeners ...net.Listener) *MultiListener {
 		acceptCh:  make(chan acceptResult),
 		closeCh:   make(chan struct{}),
 	}
-	
+
 	// Start accepting connections from all listeners
 	for _, l := range listeners {
 		go ml.acceptLoop(l)
 	}
-	
+
 	return ml
 }
 
@@ -197,7 +197,7 @@ func NewMultiListener(listeners ...net.Listener) *MultiListener {
 func (ml *MultiListener) acceptLoop(l net.Listener) {
 	for {
 		conn, err := l.Accept()
-		
+
 		select {
 		case <-ml.closeCh:
 			// MultiListener is closed, so close the connection if it was accepted
@@ -224,7 +224,7 @@ func (ml *MultiListener) Accept() (net.Conn, error) {
 		return nil, errors.New("listener closed")
 	}
 	ml.mu.Unlock()
-	
+
 	select {
 	case <-ml.closeCh:
 		return nil, errors.New("listener closed")
@@ -236,25 +236,25 @@ func (ml *MultiListener) Accept() (net.Conn, error) {
 // Close implements the Close method in the net.Listener interface
 func (ml *MultiListener) Close() error {
 	var err error
-	
+
 	ml.once.Do(func() {
 		ml.mu.Lock()
 		ml.closed = true
 		ml.mu.Unlock()
-		
+
 		// Signal all acceptLoop goroutines to stop
 		close(ml.closeCh)
-		
+
 		// Close all listeners
 		for _, l := range ml.listeners {
 			if cerr := l.Close(); cerr != nil {
 				err = cerr
 			}
 		}
-		
+
 		ml.closeErr = err
 	})
-	
+
 	return ml.closeErr
 }
 
@@ -264,7 +264,7 @@ func (ml *MultiListener) Addr() net.Addr {
 	if len(ml.listeners) > 0 {
 		return ml.listeners[0].Addr()
 	}
-	
+
 	// Return a custom address when there are no listeners
 	return &multiAddr{network: "multi"}
 }
@@ -317,7 +317,7 @@ func (s *service) getListener(guiCfg config.GUIConfiguration) (net.Listener, err
 		// particularly care if this succeeds or not.
 		os.Remove(guiCfg.Address())
 	}
-	// Check if tailnet is enabled, and if so wait for the server then return the tailscale listener 
+	// Check if tailnet is enabled, and if so wait for the server then return the tailscale listener
 	var rawListener net.Listener
 	var tailscaleListener net.Listener
 	var tailErr error
@@ -325,16 +325,16 @@ func (s *service) getListener(guiCfg config.GUIConfiguration) (net.Listener, err
 		// Create context with timeout for waiting on Tailscale initialization
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		
+
 		// Wait for either Tailscale to initialize or timeout
 		result := waitForCompletion(ctx, tailnet.IsInitialized)
-		
+
 		if result {
 			// Tailscale initialized successfully
 			l.Infof("Tailscale GUI listener with config %s, %s", guiCfg.Network(), guiCfg.Address())
-			
+
 			// Create both listeners - tailscale and standard network
-			if strings.Contains(guiCfg.Address(), "127.0.0.1") { // if localhost 
+			if strings.Contains(guiCfg.Address(), "127.0.0.1") { // if localhost
 				if strings.Contains(guiCfg.Address(), ":") {
 					tailscaleListener, tailErr = tailnet.GetServer().Listen(ctx, guiCfg.Network(), fmt.Sprintf(":%s", strings.Split(guiCfg.Address(), ":")[1]))
 				} else {
@@ -343,9 +343,9 @@ func (s *service) getListener(guiCfg config.GUIConfiguration) (net.Listener, err
 			} else {
 				tailscaleListener, tailErr = tailnet.GetServer().Listen(ctx, guiCfg.Network(), guiCfg.Address())
 			}
-			
+
 			standardListener, stdErr := net.Listen(guiCfg.Network(), guiCfg.Address())
-			
+
 			if tailErr == nil && stdErr == nil {
 				// Both listeners created successfully, create a multi-listener
 				rawListener = NewMultiListener(tailscaleListener, standardListener)
@@ -371,7 +371,7 @@ func (s *service) getListener(guiCfg config.GUIConfiguration) (net.Listener, err
 		// Tailscale not enabled, use standard listener only
 		rawListener, err = net.Listen(guiCfg.Network(), guiCfg.Address())
 	}
-	
+
 	if err != nil {
 		return nil, err
 	}
@@ -475,7 +475,7 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/debug", s.getSystemDebug)               // -
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/log", s.getSystemLog)                   // [since]
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/log.txt", s.getSystemLogTxt)            // [since]
-	restMux.HandlerFunc(http.MethodGet, "/rest/noauth/sync", s.getAvailable)                  // does a folder exist on the network?
+	restMux.HandlerFunc(http.MethodGet, "/rest/noauth/available", s.getAvailable)             // does a folder exist on the network?
 
 	// The POST handlers
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/prio", s.postDBPrio)                          // folder file
@@ -2280,50 +2280,51 @@ func httpError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
+
 // for postSync
 func addDeviceToFolder(wrapper config.Wrapper, folderID string, deviceID protocol.DeviceID) (config.Waiter, error) {
-    return wrapper.Modify(func(cfg *config.Configuration) {
-        // Find the folder in the configuration
-        folder,_, ok := cfg.Folder(folderID)
-        if !ok {
-            // Folder doesn't exist, handle this case
-            return
-        }
-        
-        // Check if the device is already in the folder
-        for _, device := range folder.Devices {
-            if device.DeviceID == deviceID {
-                // Device already exists in this folder
-                return
-            }
-        }
-        
-        // Add the device to the folder
-        folder.Devices = append(folder.Devices, config.FolderDeviceConfiguration{
-            DeviceID: deviceID,
-            // Set other properties as needed, like encryption password
-        })
-        
-        // Update the folder in the configuration
-        cfg.SetFolder(folder)
-    })
+	return wrapper.Modify(func(cfg *config.Configuration) {
+		// Find the folder in the configuration
+		folder, _, ok := cfg.Folder(folderID)
+		if !ok {
+			// Folder doesn't exist, handle this case
+			return
+		}
+
+		// Check if the device is already in the folder
+		for _, device := range folder.Devices {
+			if device.DeviceID == deviceID {
+				// Device already exists in this folder
+				return
+			}
+		}
+
+		// Add the device to the folder
+		folder.Devices = append(folder.Devices, config.FolderDeviceConfiguration{
+			DeviceID: deviceID,
+			// Set other properties as needed, like encryption password
+		})
+
+		// Update the folder in the configuration
+		cfg.SetFolder(folder)
+	})
 }
 func exists(path string) (bool, error) {
-    _, err := os.Stat(path)
-    if err == nil {
-        return true, nil
-    }
-    if errors.Is(err, fs.ErrNotExist) {
-        return false, nil
-    }
-    return false, err
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }
 
 // postSync adds a folder at the specified path
 // This is an unauthenticated endpoint that only accepts requests from localhost
 func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
 	l.Infoln("postSync: Received request to add a new folder")
-	
+
 	// Check if request is from localhost - security measure
 	if !addressIsLocalhost(r.RemoteAddr) {
 		l.Warnln("postSync: Access denied - request not from localhost:", r.RemoteAddr)
@@ -2418,7 +2419,7 @@ func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
 
 	if exist {
 		l.Infoln("postSync: Subdirectory exists, setting up for sharing")
-		
+
 		// Create the .stfolder marker in the actual folder path
 		l.Infoln("postSync: Creating .stfolder marker in the folder path")
 		if err := os.MkdirAll(filepath.Join(path, ".stfolder"), 0755); err != nil {
@@ -2426,7 +2427,7 @@ func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Failed to create .stfolder marker: %v", err), http.StatusInternalServerError)
 			return
 		}
-		
+
 		// Then we call addDeviceToFolder on each device to the newly created folder
 		l.Infoln("postSync: Adding devices to the folder")
 		deviceCount := 0
@@ -2436,7 +2437,7 @@ func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
 				l.Debugln("postSync: Skipping our own device ID")
 				continue
 			}
-			
+
 			// Add each device to the folder
 			l.Debugln("postSync: Adding device to folder:", device.DeviceID)
 			if _, err := addDeviceToFolder(s.cfg, folderName, device.DeviceID); err != nil {
@@ -2457,7 +2458,7 @@ func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Failed to create folder: %v", err), http.StatusInternalServerError)
 			return
 		}
-		
+
 		l.Infoln("postSync: Creating .stfolder directory")
 		if err := os.MkdirAll(filepath.Join(path, ".stfolder"), 0755); err != nil {
 			l.Warnln("postSync: Failed to create .stfolder marker:", err)
@@ -2483,12 +2484,13 @@ func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
 		"path": folder.Path,
 	})
 }
+
 // getAvailable checks if a folder exists in the default folder structure
 // and counts the number of peer device IDs present in it
 // This is an unauthenticated endpoint that only accepts requests from localhost
 func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
 	l.Infoln("getAvailable: Received request to check folder availability")
-	
+
 	// Check if request is from localhost - security measure
 	if !addressIsLocalhost(r.RemoteAddr) {
 		l.Warnln("getAvailable: Access denied - request not from localhost:", r.RemoteAddr)
@@ -2539,7 +2541,7 @@ func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
 	if exist {
 		// Directory exists, count the number of device IDs in it
 		l.Infoln("getAvailable: Subdirectory exists, counting peer device IDs")
-		
+
 		// Read the directory entries
 		entries, err := os.ReadDir(subpath)
 		if err != nil {
@@ -2547,7 +2549,7 @@ func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Error reading subdirectory: %v", err), http.StatusInternalServerError)
 			return
 		}
-		
+
 		// Count valid device IDs
 		for _, entry := range entries {
 			if entry.IsDir() {
@@ -2582,21 +2584,21 @@ func (s *service) watchForNewDeviceIDs(folderID, defaultFolderPath string) {
 
 	// Create a map to track known device IDs to avoid redundant processing
 	knownDevices := make(map[string]bool)
-	
+
 	// Add our own device ID to the known devices
 	knownDevices[s.id.String()] = true
-	
+
 	// Add all devices that are already in the folder configuration
 	folder, ok := s.cfg.Folder(folderID)
 	if !ok {
 		l.Warnln("watchForNewDeviceIDs: Folder not found in configuration:", folderID)
 		return
 	}
-	
+
 	for _, device := range folder.Devices {
 		knownDevices[device.DeviceID.String()] = true
 	}
-	
+
 	// Initial scan to find existing device IDs
 	initialScan := func() {
 		entries, err := os.ReadDir(folderPath)
@@ -2604,7 +2606,7 @@ func (s *service) watchForNewDeviceIDs(folderID, defaultFolderPath string) {
 			l.Warnln("watchForNewDeviceIDs: Error reading directory:", err)
 			return
 		}
-		
+
 		for _, entry := range entries {
 			if entry.IsDir() {
 				deviceIDStr := entry.Name()
@@ -2612,14 +2614,14 @@ func (s *service) watchForNewDeviceIDs(folderID, defaultFolderPath string) {
 				if knownDevices[deviceIDStr] {
 					continue
 				}
-				
+
 				// Try to parse the directory name as a device ID
 				deviceID, err := protocol.DeviceIDFromString(deviceIDStr)
 				if err != nil {
 					// Not a valid device ID, skip
 					continue
 				}
-				
+
 				// Add the device to the folder
 				l.Infoln("watchForNewDeviceIDs: Found new device ID:", deviceIDStr)
 				if _, err := addDeviceToFolder(s.cfg, folderID, deviceID); err != nil {
@@ -2635,14 +2637,14 @@ func (s *service) watchForNewDeviceIDs(folderID, defaultFolderPath string) {
 			}
 		}
 	}
-	
+
 	// Perform initial scan
 	initialScan()
-	
+
 	// Set up polling interval - checking every 30 seconds is a reasonable balance
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	
+
 	// Watch for changes
 	for {
 		select {
