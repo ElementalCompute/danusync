@@ -2488,9 +2488,6 @@ func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
 // getAvailable checks if a folder exists in the default folder structure
 // and counts the number of peer device IDs present in it
 // This is an unauthenticated endpoint that only accepts requests from localhost
-// getAvailable checks if a folder exists in the default folder structure
-// and counts the number of peer device IDs present in it
-// This is an unauthenticated endpoint that only accepts requests from localhost
 func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
 	l.Infoln("getAvailable: Received request to check folder availability")
 	
@@ -2560,20 +2557,27 @@ func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		
-		// Count all directories as potential device IDs
-		// This approach is more robust as it doesn't rely on strict device ID validation
+		// Get exact string representation of our device ID for comparison
 		myIDStr := s.id.String()
+		l.Debugln("getAvailable: Our device ID is:", myIDStr)
+		
+		// Count all directories as potential device IDs except our own exact ID
 		for _, entry := range entries {
 			if entry.IsDir() {
-				// Skip our own device ID folder if it exists
-				if entry.Name() != myIDStr {
-					peerCount++
-					l.Debugln("getAvailable: Found peer device folder:", entry.Name())
+				entryName := entry.Name()
+				
+				// Perform EXACT string match with our device ID
+				if entryName == myIDStr {
+					l.Debugln("getAvailable: Skipping our own device folder:", entryName)
 				} else {
-					l.Debugln("getAvailable: Skipping our own device folder:", entry.Name())
+					// Log more details about the folder we're counting
+					l.Debugln("getAvailable: Found peer device folder:", entryName)
+					peerCount++
 				}
 			}
 		}
+		
+		// Log the full peer count for this folder
 		l.Infoln("getAvailable: Found", peerCount, "peer device folders in", folderName)
 	} else if folderExists {
 		// The target folder exists but not in the default structure
