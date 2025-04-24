@@ -606,7 +606,10 @@ func (s *service) Serve(ctx context.Context) error {
 	}
 
 	l.Infoln("GUI and API listening on", listener.Addr())
-	l.Infoln("Access the GUI via the following URL:", guiCfg.URL())
+
+	srv = tailnet.GetServer()
+	ip4, _ = srv.TailscaleIPs()
+	l.Infoln("Access the GUI via the following URL:", fmt.Sprintf("http://%s:8384", %s))
 	if s.started != nil {
 		// only set when run by the tests
 		select {
