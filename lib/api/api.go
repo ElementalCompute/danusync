@@ -609,7 +609,7 @@ func (s *service) Serve(ctx context.Context) error {
 
 	srv = tailnet.GetServer()
 	ip4, _ = srv.TailscaleIPs()
-	l.Infoln("Access the GUI via the following URL:", fmt.Sprintf("http://%s:8384", %s))
+	l.Infoln("Access the GUI via the following URL:", fmt.Sprintf("http://%s:8384", ip4))
 	if s.started != nil {
 		// only set when run by the tests
 		select {
