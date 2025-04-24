@@ -272,14 +272,18 @@ func (a *App) startup() error {
 // Connection service depends on discovery manager to get addresses to connect to.
 // Create a wrapper that is then wired after they are both set up.
 addrLister := &lateAddressLister{}
-
+hn, err := os.Hostname()
+if err != nil {
+	l.Warnln("Cant get hostname using AAARGH")
+	hn = "AAARGH"
+}
 // Initialize Tailscale if enabled
 if a.cfg.Options().Tailscale.Enabled {
 	// bad l.Infof("TEMP: %s", a.cfg.Options().Tailscale.AuthKey)
 	cfg := tailnet.Config{
 		Enabled:  true,
 		AuthKey:  a.cfg.Options().Tailscale.AuthKey,  // Your Tailscale auth key
-		Hostname: "syncthing-node-1",                // Name for this node in Tailscale
+		Hostname: fmt.Sprintf("%s-syncthing", hn),                // Name for this node in Tailscale
 		//Tailnet:  "taild67317",                         // Optional: your tailnet name should pass
 		Tags:     []string{"tag:syncthing"}, // Optional: tailscale tags
 	}

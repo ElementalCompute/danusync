@@ -99,6 +99,11 @@ type service struct {
 
 	guiErrors logger.Recorder
 	systemLog logger.Recorder
+
+	listenersTcp      map[int]net.Listener
+	listenersTcpMutex sync.Mutex
+	listenersUdp      map[int]net.PacketConn
+	listenersUdpMutex sync.Mutex
 }
 
 var _ config.Verifier = &service{}
@@ -477,7 +482,8 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/log.txt", s.getSystemLogTxt)            // [since]
 	restMux.HandlerFunc(http.MethodGet, "/rest/noauth/available", s.getAvailable)             // does a folder exist on the network?
 	restMux.HandlerFunc(http.MethodGet, "/rest/noauth/device", s.cleanDevice)                 // Remove a device from the network as a peer
-	restMux.HandlerFunc(http.MethodGet, "/rest/noauth/folders", s.getFolderList)			  // Get a list of available folders
+	restMux.HandlerFunc(http.MethodGet, "/rest/noauth/folders", s.getFolderList)              // Get a list of available folders
+	restMux.HandlerFunc(http.MethodGet, "/rest/noauth/tsnet/ip", s.getTailscaleIP)
 
 	// The POST handlers
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/prio", s.postDBPrio)                          // folder file
@@ -607,8 +613,8 @@ func (s *service) Serve(ctx context.Context) error {
 
 	l.Infoln("GUI and API listening on", listener.Addr())
 
-	srv = tailnet.GetServer()
-	ip4, _ = srv.TailscaleIPs()
+	tssrv := tailnet.GetServer()
+	ip4, _ := tssrv.TailscaleIPs()
 	l.Infoln("Access the GUI via the following URL:", fmt.Sprintf("http://%s:8384", ip4))
 	if s.started != nil {
 		// only set when run by the tests
@@ -2324,110 +2330,90 @@ func exists(path string) (bool, error) {
 	}
 	return false, err
 }
+
 // getFolderList returns a list of folder IDs for which getAvailable would return > 0
 // This is an unauthenticated endpoint that only accepts requests from localhost
 func (s *service) getFolderList(w http.ResponseWriter, r *http.Request) {
-	l.Infoln("getFolderList: Received request for folders with available resources")
-
-	// Check if request is from localhost - security measure
-	if !addressIsLocalhost(r.RemoteAddr) {
-		l.Warnln("getFolderList: Access denied - request not from localhost:", r.RemoteAddr)
-		http.Error(w, "Access denied: This endpoint is only available from localhost", http.StatusForbidden)
-		return
-	}
-
-	// Get the default folder to access its path
-	defaultFolder, ok := s.cfg.Folder("default")
-	if !ok {
-		l.Warnln("getFolderList: Default folder not found")
-		http.Error(w, "Default folder not found", http.StatusInternalServerError)
-		return
-	}
-	defaultFolderPath := defaultFolder.Path
-	l.Infoln("getFolderList: Default folder path:", defaultFolderPath)
-
-	var availableFolders []string
-	
-	// Iterate through all folders in configuration
-	l.Debugln("getFolderList: Checking all folders for availability")
-	for _, folder := range s.cfg.FolderList() {
-		folderID := folder.ID
-		
-		// Skip the default folder itself
-		if folderID == "default" {
-			l.Debugln("getFolderList: Skipping default folder")
-			continue
-		}
-		
-		l.Debugln("getFolderList: Checking folder:", folderID)
-		
-		// Check each device's subdirectory in default folder structure
-		deviceSubdir := filepath.Join(defaultFolderPath, folderID)
-		
-		// Skip if the folder's subdirectory doesn't exist in default folder
-		exists, err := exists(deviceSubdir)
-		if err != nil {
-			l.Warnln("getFolderList: Error checking folder subdirectory:", err)
-			continue
-		}
-		if !exists {
-			l.Debugln("getFolderList: Folder subdirectory doesn't exist:", deviceSubdir)
-			continue
-		}
-		
-		// Read all items in the folder's subdirectory
-		items, err := os.ReadDir(deviceSubdir)
-		if err != nil {
-			l.Warnln("getFolderList: Error reading directory:", err)
-			continue
-		}
-		
-		// Exit early as soon as we find one valid device ID
-		hasAvailableDevice := false
-		for _, item := range items {
-			if item.IsDir() {
-				// Check if directory name is a valid device ID
-				if _, err := protocol.DeviceIDFromString(item.Name()); err == nil {
-					l.Debugln("getFolderList: Found device:", item.Name())
-					hasAvailableDevice = true
-					break  // Exit as soon as we find one device
-				}
-			}
-		}
-		
-		// If we have at least one available device, add this folder to our list
-		if hasAvailableDevice {
-			l.Infoln("getFolderList: Folder has available resources:", folderID)
-			availableFolders = append(availableFolders, folderID)
-		}
-	}
-	
-	l.Infoln("getFolderList: Found", len(availableFolders), "folders with available resources")
-	
-	// Prepare response data structure
-	type folderInfo struct {
-		ID   string `json:"id"`
-		Path string `json:"path"`
-	}
-	
-	// Build response with folder ID and path information
-	response := make([]folderInfo, 0, len(availableFolders))
-	for _, id := range availableFolders {
-		folder, ok := s.cfg.Folder(id)
-		if !ok {
-			l.Warnln("getFolderList: Folder configuration not found for ID:", id)
-			continue
-		}
-		
-		response = append(response, folderInfo{
-			ID:   folder.ID,
-			Path: folder.Path,
-		})
-	}
-	
-	// Send JSON response
-	l.Debugln("getFolderList: Sending response with", len(response), "folders")
-	sendJSON(w, response)
+    l.Infoln("getFolderList: Received request for folders with available resources")
+    // Check if request is from localhost - security measure
+    if !addressIsLocalhost(r.RemoteAddr) {
+        l.Warnln("getFolderList: Access denied - request not from localhost:", r.RemoteAddr)
+        http.Error(w, "Access denied: This endpoint is only available from localhost", http.StatusForbidden)
+        return
+    }
+    
+    // Get the default folder to access its path
+    defaultFolder, ok := s.cfg.Folder("default")
+    if !ok {
+        l.Warnln("getFolderList: Default folder not found")
+        http.Error(w, "Default folder not found", http.StatusInternalServerError)
+        return
+    }
+    defaultFolderPath := defaultFolder.Path
+    l.Infoln("getFolderList: Default folder path:", defaultFolderPath)
+    
+    // Prepare response data structure
+    type folderInfo struct {
+        ID   string `json:"id"`
+        Path string `json:"path"`
+    }
+    var response []folderInfo
+    
+    // Directly read all entries in the default folder
+    l.Infoln("getFolderList: Reading subdirectories in default folder")
+    items, err := os.ReadDir(defaultFolderPath)
+    if err != nil {
+        l.Warnln("getFolderList: Error reading default folder directory:", err)
+        http.Error(w, "Failed to read default folder directory", http.StatusInternalServerError)
+        return
+    }
+    
+    // Iterate through each entry in the default folder
+    for _, item := range items {
+        // Only consider subdirectories, not files
+        if !item.IsDir() {
+            l.Debugln("getFolderList: Skipping non-directory entry:", item.Name())
+            continue
+        }
+        
+        // Skip the default folder itself if it appears as a subdirectory
+        if item.Name() == "default" {
+            l.Debugln("getFolderList: Skipping default folder")
+            continue
+        }
+        
+        folderID := item.Name()
+        l.Infoln("getFolderList: Checking subdirectory:", folderID)
+        
+        // Get the full path of the subdirectory
+        subDirPath := filepath.Join(defaultFolderPath, folderID)
+        
+        // Read all items in the subdirectory
+        subDirItems, err := os.ReadDir(subDirPath)
+        if err != nil {
+            l.Warnln("getFolderList: Error reading subdirectory:", err)
+            continue
+        }
+        
+        // Check if subdirectory contains at least one entry (file OR directory)
+        if len(subDirItems) > 0 {
+            l.Infoln("getFolderList: Subdirectory has contents:", folderID, "with", len(subDirItems), "entries")
+            
+            // Add this folder to the response, using only filesystem information
+            response = append(response, folderInfo{
+                ID:   folderID,
+                Path: subDirPath,
+            })
+        } else {
+            l.Infoln("getFolderList: Subdirectory exists but is empty:", folderID)
+        }
+    }
+    
+    l.Infoln("getFolderList: Found", len(response), "folders with available resources")
+    
+    // Send JSON response
+    l.Infoln("getFolderList: Sending response with", len(response), "folders")
+    sendJSON(w, response)
 }
 // postSync adds a folder at the specified path
 // This is an unauthenticated endpoint that only accepts requests from localhost
@@ -2602,7 +2588,7 @@ func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
 // This is an unauthenticated endpoint that only accepts requests from localhost
 func (s *service) cleanDevice(w http.ResponseWriter, r *http.Request) {
 	l.Infoln("cleanDevice: Received request to clean up a device ID")
-	
+
 	// Check if request is from localhost - security measure
 	if !addressIsLocalhost(r.RemoteAddr) {
 		l.Warnln("cleanDevice: Access denied - request not from localhost:", r.RemoteAddr)
@@ -2617,7 +2603,7 @@ func (s *service) cleanDevice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "deviceID parameter is required", http.StatusBadRequest)
 		return
 	}
-	
+
 	l.Infoln("cleanDevice: Processing device ID:", deviceIDStr)
 
 	// Get the path of the Default folder
@@ -2648,16 +2634,16 @@ func (s *service) cleanDevice(w http.ResponseWriter, r *http.Request) {
 		if !entry.IsDir() {
 			continue
 		}
-		
+
 		folderName := entry.Name()
 		subpath := filepath.Join(defaultFolderPath, folderName)
 		l.Debugln("cleanDevice: Checking folder:", folderName)
-		
+
 		// Skip special folders
 		if folderName == "." || folderName == ".." || folderName == ".stfolder" {
 			continue
 		}
-		
+
 		// Check if the device ID directory exists in this folder
 		devicePath := filepath.Join(subpath, deviceIDStr)
 		deviceExists, err := exists(devicePath)
@@ -2666,7 +2652,7 @@ func (s *service) cleanDevice(w http.ResponseWriter, r *http.Request) {
 			errors = append(errors, fmt.Sprintf("Error checking device in %s: %v", folderName, err))
 			continue
 		}
-		
+
 		if deviceExists {
 			// Remove the device ID directory
 			l.Infoln("cleanDevice: Removing device directory:", devicePath)
@@ -2675,9 +2661,9 @@ func (s *service) cleanDevice(w http.ResponseWriter, r *http.Request) {
 				errors = append(errors, fmt.Sprintf("Error removing device from %s: %v", folderName, err))
 				continue
 			}
-			
+
 			deviceDirsRemoved++
-			
+
 			// Check if this was the last device ID in the folder
 			remainingEntries, err := os.ReadDir(subpath)
 			if err != nil {
@@ -2685,7 +2671,7 @@ func (s *service) cleanDevice(w http.ResponseWriter, r *http.Request) {
 				errors = append(errors, fmt.Sprintf("Error reading subfolder %s: %v", folderName, err))
 				continue
 			}
-			
+
 			// Count remaining device directories
 			deviceCount := 0
 			for _, e := range remainingEntries {
@@ -2693,34 +2679,34 @@ func (s *service) cleanDevice(w http.ResponseWriter, r *http.Request) {
 					deviceCount++
 				}
 			}
-			
+
 			if deviceCount == 0 {
 				// This was the last device ID, remove the folder
 				l.Infoln("cleanDevice: No devices left in folder, removing folder:", subpath)
-				
+
 				if err := os.RemoveAll(subpath); err != nil {
 					l.Warnln("cleanDevice: Error removing empty folder:", err)
 					errors = append(errors, fmt.Sprintf("Error removing empty folder %s: %v", folderName, err))
 					continue
 				}
-				
+
 				emptyFoldersRemoved++
 			}
 		}
 	}
-	
+
 	// Return results
 	l.Infoln("cleanDevice: Completed with", deviceDirsRemoved, "device directories removed,", emptyFoldersRemoved, "empty folders removed,", len(errors), "errors")
 	response := map[string]interface{}{
-		"deviceID": deviceIDStr,
-		"deviceDirsRemoved": deviceDirsRemoved,
+		"deviceID":            deviceIDStr,
+		"deviceDirsRemoved":   deviceDirsRemoved,
 		"emptyFoldersRemoved": emptyFoldersRemoved,
 	}
-	
+
 	if len(errors) > 0 {
 		response["errors"] = errors
 	}
-	
+
 	sendJSON(w, response)
 }
 
@@ -2729,7 +2715,7 @@ func (s *service) cleanDevice(w http.ResponseWriter, r *http.Request) {
 // This is an unauthenticated endpoint that only accepts requests from localhost
 func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
 	l.Infoln("getAvailable: Received request to check folder availability")
-	
+
 	// Check if request is from localhost - security measure
 	if !addressIsLocalhost(r.RemoteAddr) {
 		l.Warnln("getAvailable: Access denied - request not from localhost:", r.RemoteAddr)
@@ -2787,7 +2773,7 @@ func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
 	if subpathExists {
 		// Directory exists in the default folder structure, count the directories inside it
 		l.Infoln("getAvailable: Subdirectory exists, counting peer device IDs")
-		
+
 		// Read the directory entries
 		entries, err := os.ReadDir(subpath)
 		if err != nil {
@@ -2795,16 +2781,16 @@ func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Error reading subdirectory: %v", err), http.StatusInternalServerError)
 			return
 		}
-		
+
 		// Get exact string representation of our device ID for comparison
 		myIDStr := s.id.String()
 		l.Debugln("getAvailable: Our device ID is:", myIDStr)
-		
+
 		// Count all directories as potential device IDs except our own exact ID
 		for _, entry := range entries {
 			if entry.IsDir() {
 				entryName := entry.Name()
-				
+
 				// Perform EXACT string match with our device ID
 				if entryName == myIDStr {
 					l.Debugln("getAvailable: COUNTING our own device folder:", entryName)
@@ -2816,7 +2802,7 @@ func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		
+
 		// Log the full peer count for this folder
 		l.Infoln("getAvailable: Found", peerCount, "peer device folders in", folderName)
 	} else if folderExists {
@@ -2832,6 +2818,19 @@ func (s *service) getAvailable(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, map[string]int{
 		"peers": peerCount,
 	})
+}
+
+func (s *service) getTailscaleIP(w http.ResponseWriter, r *http.Request) {
+	if !addressIsLocalhost(r.RemoteAddr) {
+		http.Error(w, "Endpoint only available from localhost", 401)
+		return
+	}
+
+	srv := tailnet.GetServer()
+
+	ip4, _ := srv.TailscaleIPs()
+
+	sendJSON(w, map[string]string{"ipv4": ip4.String()})
 }
 
 // watchForNewDeviceIDs watches the specified folder path for new device IDs and adds them to the folder configuration
