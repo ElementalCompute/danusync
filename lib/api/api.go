@@ -2400,10 +2400,11 @@ func (s *service) getFolderList(w http.ResponseWriter, r *http.Request) {
             l.Infoln("getFolderList: Subdirectory has contents:", folderID, "with", len(subDirItems), "entries")
             
             // Add this folder to the response, using only filesystem information
-            response = append(response, folderInfo{
-                ID:   folderID,
-                Path: subDirPath,
-            })
+			if folderID != ".stfolder" {
+            	response = append(response, folderInfo{
+                	ID:   folderID,
+                	Path: subDirPath,
+            })}
         } else {
             l.Infoln("getFolderList: Subdirectory exists but is empty:", folderID)
         }
